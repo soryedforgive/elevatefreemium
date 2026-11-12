@@ -1,0 +1,725 @@
+run(function()
+    local MP3Player
+    local Volume
+    local Shuffle
+    local Loop
+    local PlayField
+    local Playlist
+    local ShowHUD
+    local PulseToBeat
+    local PulseIntensity
+    local PulseType
+    local PulseColor
+    local PulseRegions
+
+    local SONGS = 'ElevateV4/songs'
+    local SPOTIFY = 'ElevateV4/spotify'
+
+    local soundService = game:GetService('SoundService')
+    local sound
+    local tracks, index = {}, 0
+    local hudName, hudTime, hudBarFill, hudBackground
+    local pulseWhole, pulseEdges = nil, {}
+    local lastScan = 0
+    local scanKey = ''
+    local lastPlay = 0
+    local loadDeadline = 0
+    local loadFailures = 0
+    local beatCooldown = 0
+    local loudnessAverage, lastLoudness = 0, 0
+    local FOV_STEP_NAME = 'AetherMP3BeatPulse'
+    local fovOffset, fovBase = 0, nil
+    local fovBound, fovPreRender = false, nil
+    local beatTimes, tempo, nextBeat, offBeat = {}, nil, 0, 0
+    local LOCK_TOLERANCE = 0.22
+    local LOCK_SAMPLES = 3
+
+    local function fsList(path)
+        local ok, res = pcall(function()
+            if isfolder and not isfolder(path) then
+                if makefolder then makefolder(path) end
+                return {}
+            end
+            return listfiles and listfiles(path) or {}
+        end)
+        return ok and res or {}
+    end
+
+    local function isAudio(path)
+        path = tostring(path):lower()
+        return path:sub(-4) == '.mp3' or path:sub(-4) == '.wav' or path:sub(-4) == '.ogg'
+    end
+
+    local function fileName(path)
+        local normalised = tostring(path):gsub('\\', '/')
+        local name = normalised:match('([^/]+)$') or normalised
+        return (name:gsub('%.[^%.]+$', ''))
+    end
+
+    local function scan(announce)
+        local found = {}
+        for _, file in fsList(SONGS) do
+            if isAudio(file) then
+                table.insert(found, {Name = fileName(file), Path = tostring(file):gsub('\\', '/')})
+            end
+        end
+        for _, file in fsList(SPOTIFY) do
+            if isAudio(file) then
+                table.insert(found, {Name = fileName(file), Path = tostring(file):gsub('\\', '/')})
+            end
+        end
+        table.sort(found, function(a, b)
+            return a.Name:lower() < b.Name:lower()
+        end)
+
+        local wanted = Playlist and Playlist.ListEnabled or {}
+        if #wanted > 0 then
+            local ordered = {}
+            for _, entry in wanted do
+                local needle = entry:lower()
+                for _, track in found do
+                    if track.Name:lower():find(needle, 1, true) then
+                        table.insert(ordered, track)
+                        break
+                    end
+                end
+            end
+            if #ordered > 0 then
+                found = ordered
+            end
+        end
+
+        local key = ''
+        for _, track in found do
+            key = key .. track.Path .. ';'
+        end
+        local changed = key ~= scanKey
+        scanKey = key
+        tracks = found
+        if changed and announce and MP3Player.Enabled then
+            notif('MP3Player', #tracks > 0 and (#tracks .. ' song' .. (#tracks == 1 and '' or 's') .. ' loaded') or 'No songs in the songs folder yet', 3)
+        end
+        return changed
+    end
+
+    local function assetFor(path)
+        local ok, asset = pcall(function()
+            return getcustomasset(path)
+        end)
+        return ok and asset or nil
+    end
+
+    local function refreshHUD()
+        if not hudName then return end
+        local track = tracks[index]
+        hudName.Text = track and track.Name or 'No song loaded'
+
+        local length = sound and sound.TimeLength or 0
+        local at = sound and sound.TimePosition or 0
+        if hudTime then
+            local function clock(t)
+                t = math.max(math.floor(t), 0)
+                return string.format('%d:%02d', t // 60, t % 60)
+            end
+            hudTime.Text = track and (clock(at) .. ' / ' .. clock(length)) or ''
+        end
+        if hudBarFill then
+            hudBarFill.Size = UDim2.fromScale(length > 0 and math.clamp(at / length, 0, 1) or 0, 1)
+        end
+    end
+
+    local function setPulseTransparency(transparency)
+        local value = math.clamp(transparency, 0, 1)
+        if pulseWhole then
+            pulseWhole.BackgroundTransparency = value
+        end
+        for _, edge in ipairs(pulseEdges) do
+            edge.BackgroundTransparency = value
+        end
+    end
+
+    local stopFovPulse
+
+    local FOV_ATTACK = 30
+    local FOV_DECAY = 8
+    local FOV_BUMP_MIN = 2
+    local FOV_BUMP_MAX = 20
+    local fovBump, fovBumpAt = 0, 0
+
+    local function applyFovPulse(delta)
+        local camera = workspace.CurrentCamera
+        if not camera then return end
+        local now = os.clock()
+        local step = math.clamp(delta or 0, 0, 0.1)
+        local target = fovBump > 0 and fovBump * math.exp(-FOV_DECAY * (now - fovBumpAt)) or 0
+        local speed = target > fovOffset and FOV_ATTACK or FOV_DECAY
+        fovOffset += (target - fovOffset) * (1 - math.exp(-step * speed))
+        local gameFov = camera.FieldOfView - fovOffset
+        if target <= 0.01 and fovOffset <= 0.05 then
+            fovOffset, fovBump = 0, 0
+            camera.FieldOfView = gameFov
+            stopFovPulse()
+            return
+        end
+        camera.FieldOfView = gameFov + fovOffset
+    end
+
+    local function startFovPulse(amount)
+        local current = fovBump > 0 and fovBump * math.exp(-FOV_DECAY * (os.clock() - fovBumpAt)) or 0
+        fovBump, fovBumpAt = math.max(amount, current), os.clock()
+        if fovBound then return end
+        fovBound = true
+        runService:BindToRenderStep(FOV_STEP_NAME, Enum.RenderPriority.Last.Value, applyFovPulse)
+        fovPreRender = runService.PreRender:Connect(function()
+            applyFovPulse(0)
+        end)
+    end
+
+    stopFovPulse = function()
+        local camera = workspace.CurrentCamera
+        if camera and fovOffset ~= 0 then
+            camera.FieldOfView = camera.FieldOfView - fovOffset
+        end
+        fovBump, fovBumpAt, fovOffset, fovBase = 0, 0, 0, nil
+        if fovBound then
+            fovBound = false
+            runService:UnbindFromRenderStep(FOV_STEP_NAME)
+        end
+        if fovPreRender then
+            fovPreRender:Disconnect()
+            fovPreRender = nil
+        end
+    end
+
+    local function resetBeatLock()
+        table.clear(beatTimes)
+        tempo, nextBeat, offBeat = nil, 0, 0
+    end
+
+    local function resetPulse()
+        setPulseTransparency(1)
+        stopFovPulse()
+        beatCooldown = 0
+        loudnessAverage, lastLoudness = 0, 0
+        resetBeatLock()
+    end
+
+    local function beatInterval()
+        local gaps = {}
+        for index = 2, #beatTimes do
+            local gap = beatTimes[index] - beatTimes[index - 1]
+            if gap >= 0.24 and gap <= 1.6 then
+                table.insert(gaps, gap)
+            end
+        end
+        if #gaps < LOCK_SAMPLES then return nil end
+        table.sort(gaps)
+        local median = gaps[math.floor((#gaps + 1) / 2)]
+        local agreeing = 0
+        for _, gap in gaps do
+            if math.abs(gap - median) <= median * 0.18 then agreeing += 1 end
+        end
+        return agreeing >= LOCK_SAMPLES and median or nil
+    end
+
+    local function onOnset(now)
+        table.insert(beatTimes, now)
+        while #beatTimes > 10 do
+            table.remove(beatTimes, 1)
+        end
+
+        if tempo then
+            if math.abs(now - nextBeat) <= tempo * LOCK_TOLERANCE then
+                nextBeat = now + tempo
+                offBeat = 0
+            else
+                offBeat += 1
+                if offBeat >= 3 then
+                    local interval = beatInterval()
+                    tempo, nextBeat, offBeat = interval, interval and now + interval or 0, 0
+                end
+            end
+            return false
+        end
+
+        local interval = beatInterval()
+        if interval then
+            tempo, nextBeat, offBeat = interval, now + interval, 0
+        end
+        return true
+    end
+
+    local function firePulse(peak)
+        local intensity = math.clamp((PulseIntensity and PulseIntensity.Value or 55) / 100, 0, 1)
+        local strength = math.clamp(intensity * (0.55 + peak * 0.45), 0, 1)
+        if (PulseType and PulseType.Value or 'FOV') == 'FOV' then
+            startFovPulse(FOV_BUMP_MIN + intensity * (FOV_BUMP_MAX - FOV_BUMP_MIN))
+            return
+        end
+        local colour = PulseColor and Color3.fromHSV(PulseColor.Hue or 0, PulseColor.Sat or 0, PulseColor.Value == nil and 1 or PulseColor.Value) or Color3.new(1, 1, 1)
+        if pulseWhole then
+            pulseWhole.BackgroundColor3 = colour
+        end
+        for _, edge in ipairs(pulseEdges) do
+            edge.BackgroundColor3 = colour
+        end
+        setPulseTransparency(1 - strength)
+    end
+
+    local function pulseFromBeat(loudness)
+        if not PulseToBeat.Enabled or not sound or not sound.IsPlaying then return end
+        local now = os.clock()
+        local onset = false
+
+        if loudness <= 0 then
+            lastLoudness = 0
+        else
+            if loudnessAverage <= 0 then
+                loudnessAverage = loudness
+            else
+                loudnessAverage = loudnessAverage * 0.9 + loudness * 0.1
+            end
+
+            local rising = loudness >= lastLoudness
+            lastLoudness = loudness
+            local threshold = math.max(loudnessAverage * 1.3, 15)
+            if rising and loudness >= threshold and now >= beatCooldown then
+                beatCooldown = now + 0.18
+                onset = true
+            end
+        end
+
+        local peak = math.clamp(loudness / math.max(loudnessAverage, 1) - 1, 0, 1)
+        if onset and onOnset(now) then
+            firePulse(peak)
+        end
+
+        if tempo and now >= nextBeat then
+            firePulse(math.max(peak, 0.5))
+            nextBeat += tempo
+            if nextBeat < now then nextBeat = now + tempo end
+        end
+    end
+
+    local function stop()
+        if sound then
+            pcall(function()
+                sound:Stop()
+            end)
+        end
+        resetPulse()
+    end
+
+    local function applyLoop()
+        if not (sound and Loop and Shuffle) then return end
+        sound.Looped = Loop.Enabled and not Shuffle.Enabled
+    end
+
+    local function play(newIndex, attempt)
+        attempt = attempt or 0
+        if #tracks <= 0 or attempt >= #tracks then
+            if #tracks > 0 then
+                notif('MP3Player', 'None of the songs in the folder could be played', 5, 'warning')
+            end
+            index = 0
+            loadFailures = 0
+            refreshHUD()
+            resetPulse()
+            return
+        end
+        index = ((newIndex - 1) % #tracks) + 1
+        local track = tracks[index]
+        local asset = track and assetFor(track.Path)
+        if not asset then
+            notif('MP3Player', 'Skipping ' .. (track and track.Name or 'a song') .. ' - it could not be loaded', 4, 'warning')
+            play(index + 1, attempt + 1)
+            return
+        end
+        if not sound then return end
+
+        lastPlay = tick()
+        loadDeadline = tick() + 5
+        sound.SoundId = asset
+        sound.Volume = Volume.Value / 100
+        sound.TimePosition = 0
+        applyLoop()
+        resetPulse()
+        pcall(function()
+            sound:Play()
+        end)
+        refreshHUD()
+    end
+
+    local function advance(step)
+        if #tracks <= 0 then return end
+        if Shuffle.Enabled and #tracks > 1 then
+            local pick = index
+            for _ = 1, 8 do
+                pick = math.random(1, #tracks)
+                if pick ~= index then break end
+            end
+            play(pick)
+            return
+        end
+        play(index + step)
+    end
+
+    MP3Player = vape.Categories.Utility:CreateModule({
+        Name = 'MP3Player',
+        Function = function(callback)
+            if callback then
+                if not (listfiles and getcustomasset) then
+                    notif('MP3Player', 'Your executor cannot read local files, so there is nothing to play', 6, 'warning')
+                    return task.spawn(function()
+                        if MP3Player.Enabled then MP3Player:Toggle() end
+                    end)
+                end
+                if isfolder and makefolder then
+                    if not isfolder(SONGS) then makefolder(SONGS) end
+                end
+
+                sound = Instance.new('Sound')
+                sound.Name = 'AetherMP3'
+                sound.Volume = Volume.Value / 100
+                sound.Parent = soundService
+                MP3Player:Clean(sound)
+                MP3Player:Clean(sound.Ended:Connect(function()
+                    if not MP3Player.Enabled then return end
+                    advance(1)
+                end))
+
+                if MP3Player.Children then
+                    MP3Player.Children.Visible = ShowHUD.Enabled
+                end
+
+                scan(true)
+                if #tracks > 0 then
+                    play(Shuffle.Enabled and math.random(1, #tracks) or 1)
+                end
+
+                MP3Player:Clean(runService.RenderStepped:Connect(function()
+                    if PulseToBeat.Enabled and sound and sound.IsPlaying then
+                        pulseFromBeat(sound.PlaybackLoudness)
+                    else
+                        resetPulse()
+                    end
+
+                    if pulseWhole and pulseWhole.BackgroundTransparency < 1 then
+                        setPulseTransparency(math.min(1, pulseWhole.BackgroundTransparency + 0.08))
+                    end
+                end))
+
+                MP3Player:Clean(task.spawn(function()
+                    while MP3Player.Enabled do
+                        if tick() - lastScan > 3 then
+                            lastScan = tick()
+                            local changed = scan(true)
+                            if changed and sound and not sound.IsPlaying and #tracks > 0 then
+                                play(index > 0 and index or 1)
+                            end
+                        end
+                        local track = tracks[index]
+                        if sound and track and sound.SoundId ~= '' then
+                            if sound.IsPlaying or sound.IsPaused then
+                                loadDeadline = 0
+                                loadFailures = 0
+                            elseif loadDeadline > 0 and tick() > loadDeadline then
+                                loadDeadline = 0
+                                loadFailures += 1
+                                if loadFailures >= #tracks then
+                                    notif('MP3Player', 'No song in the folder would play', 5, 'warning')
+                                    index = 0
+                                    sound.SoundId = ''
+                                    refreshHUD()
+                                    resetPulse()
+                                else
+                                    notif('MP3Player', 'Skipping ' .. track.Name .. ' - it would not play', 4, 'warning')
+                                    advance(1)
+                                end
+                            elseif sound.IsLoaded and (tick() - lastPlay) > 1 then
+                                advance(1)
+                            end
+                        end
+                        refreshHUD()
+                        task.wait(0.2)
+                    end
+                end))
+            else
+                stop()
+                sound = nil
+                index = 0
+                scanKey = ''
+                loadDeadline = 0
+                loadFailures = 0
+                refreshHUD()
+            end
+        end,
+        Tooltip = 'Plays your mp3 files from the ElevateV4/songs folder',
+        Size = UDim2.fromOffset(236, 66),
+        ExtraText = function()
+            local track = tracks[index]
+            return track and track.Name or nil
+        end
+    })
+
+    if MP3Player.Children then
+        local hud = MP3Player.Children
+        if hud.Position == UDim2.new() then
+            hud.Position = UDim2.fromOffset(16, 340)
+        end
+        hudBackground = Instance.new('Frame')
+        hudBackground.Size = UDim2.fromScale(1, 1)
+        hudBackground.BackgroundColor3 = Color3.new()
+        hudBackground.BackgroundTransparency = 0.35
+        hudBackground.BorderSizePixel = 0
+        hudBackground.Parent = hud
+        local corner = Instance.new('UICorner')
+        corner.CornerRadius = UDim.new(0, 5)
+        corner.Parent = hudBackground
+
+        local title = Instance.new('TextLabel')
+        title.Size = UDim2.new(1, -14, 0, 16)
+        title.Position = UDim2.fromOffset(9, 5)
+        title.BackgroundTransparency = 1
+        title.Font = Enum.Font.GothamBold
+        title.TextSize = 12
+        title.TextXAlignment = Enum.TextXAlignment.Left
+        title.TextColor3 = Color3.fromRGB(170, 170, 170)
+        title.Text = 'MP3Player'
+        title.Parent = hudBackground
+
+        hudName = Instance.new('TextLabel')
+        hudName.Size = UDim2.new(1, -18, 0, 18)
+        hudName.Position = UDim2.fromOffset(9, 21)
+        hudName.BackgroundTransparency = 1
+        hudName.Font = Enum.Font.GothamMedium
+        hudName.TextSize = 13
+        hudName.TextXAlignment = Enum.TextXAlignment.Left
+        hudName.TextTruncate = Enum.TextTruncate.AtEnd
+        hudName.TextColor3 = Color3.new(1, 1, 1)
+        hudName.Text = 'No song loaded'
+        hudName.Parent = hudBackground
+
+        hudTime = Instance.new('TextLabel')
+        hudTime.Size = UDim2.new(1, -18, 0, 14)
+        hudTime.Position = UDim2.fromOffset(-9, 5)
+        hudTime.BackgroundTransparency = 1
+        hudTime.Font = Enum.Font.Gotham
+        hudTime.TextSize = 11
+        hudTime.TextXAlignment = Enum.TextXAlignment.Right
+        hudTime.TextColor3 = Color3.new(1, 1, 1)
+        hudTime.Text = ''
+        hudTime.Parent = hudBackground
+
+        local bar = Instance.new('Frame')
+        bar.Size = UDim2.new(1, -18, 0, 4)
+        bar.Position = UDim2.fromOffset(9, 46)
+        bar.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        bar.BorderSizePixel = 0
+        bar.Parent = hudBackground
+        local barCorner = Instance.new('UICorner')
+        barCorner.CornerRadius = UDim.new(1, 0)
+        barCorner.Parent = bar
+
+        hudBarFill = Instance.new('Frame')
+        hudBarFill.Size = UDim2.fromScale(0, 1)
+        hudBarFill.BackgroundColor3 = Color3.new(1, 1, 1)
+        hudBarFill.BorderSizePixel = 0
+        hudBarFill.Parent = bar
+        local fillCorner = Instance.new('UICorner')
+        fillCorner.CornerRadius = UDim.new(1, 0)
+        fillCorner.Parent = hudBarFill
+    end
+
+    
+    pulseWhole = Instance.new('Frame')
+    pulseWhole.Name = 'AetherMP3BeatPulse'
+    pulseWhole.Size = UDim2.fromScale(1, 1)
+    pulseWhole.Position = UDim2.fromScale(0, 0)
+    pulseWhole.BackgroundColor3 = Color3.new(1, 1, 1)
+    pulseWhole.BackgroundTransparency = 1
+    pulseWhole.BorderSizePixel = 0
+    pulseWhole.ZIndex = 40
+    pulseWhole.Visible = false
+    pulseWhole.Parent = vape.gui
+
+    for _, spec in ipairs({
+        {Name = 'Top', Size = UDim2.new(1, 0, 0.18, 0), Position = UDim2.fromScale(0, 0), Rotation = 90},
+        {Name = 'Bottom', Size = UDim2.new(1, 0, 0.18, 0), Position = UDim2.fromScale(0, 0.82), Rotation = 270},
+        {Name = 'Left', Size = UDim2.new(0.14, 0, 0.64, 0), Position = UDim2.fromScale(0, 0.18), Rotation = 0},
+        {Name = 'Right', Size = UDim2.new(0.14, 0, 0.64, 0), Position = UDim2.fromScale(0.86, 0.18), Rotation = 180}
+    }) do
+        local edge = Instance.new('Frame')
+        edge.Name = spec.Name
+        edge.Size = spec.Size
+        edge.Position = spec.Position
+        edge.BackgroundColor3 = Color3.new(1, 1, 1)
+        edge.BackgroundTransparency = 1
+        edge.BorderSizePixel = 0
+        edge.ZIndex = 40
+        edge.Visible = false
+        edge.Parent = pulseWhole
+        local gradient = Instance.new('UIGradient')
+        gradient.Rotation = spec.Rotation
+        gradient.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0),
+            NumberSequenceKeypoint.new(1, 1)
+        })
+        gradient.Parent = edge
+        table.insert(pulseEdges, edge)
+    end
+
+    MP3Player:CreateButton({
+        Name = 'Play / Pause',
+        Function = function()
+            if not sound then return end
+            if sound.IsPlaying then
+                sound:Pause()
+            elseif sound.SoundId ~= '' then
+                sound:Resume()
+            else
+                play(index > 0 and index or 1)
+            end
+        end,
+        Tooltip = 'Pause or resume the current song'
+    })
+    MP3Player:CreateButton({
+        Name = 'Next song',
+        Function = function()
+            advance(1)
+        end
+    })
+    MP3Player:CreateButton({
+        Name = 'Previous song',
+        Function = function()
+            advance(-1)
+        end
+    })
+    MP3Player:CreateButton({
+        Name = 'Refresh songs',
+        Function = function()
+            lastScan = tick()
+            scan(true)
+            refreshHUD()
+        end,
+        Tooltip = 'Reloads the songs folder'
+    })
+    Volume = MP3Player:CreateSlider({
+        Name = 'Volume',
+        Min = 0,
+        Max = 100,
+        Default = 40,
+        Suffix = '%',
+        Function = function(val)
+            if sound then
+                sound.Volume = val / 100
+            end
+        end
+    })
+    Shuffle = MP3Player:CreateToggle({
+        Name = 'Shuffle',
+        Function = applyLoop,
+        Tooltip = 'Pick the next song at random instead of in order'
+    })
+    Loop = MP3Player:CreateToggle({
+        Name = 'Loop song',
+        Function = applyLoop,
+        Tooltip = 'Repeat the current song instead of moving on'
+    })
+    PlayField = MP3Player:CreateTextBox({
+        Name = 'Play song',
+        Placeholder = 'song name',
+        Function = function(enter)
+            if not enter then return end
+            local val = PlayField and PlayField.Value or ''
+            if val == '' then return end
+            scan(false)
+            local needle = val:lower()
+            for i, track in tracks do
+                if track.Name:lower():find(needle, 1, true) then
+                    play(i)
+                    return
+                end
+            end
+            notif('MP3Player', 'No song matching "' .. val .. '"', 4, 'warning')
+        end,
+        Tooltip = 'Type part of a song name to jump straight to it'
+    })
+    Playlist = MP3Player:CreateTextList({
+        Name = 'Playlist',
+        Placeholder = 'song name',
+        Function = function()
+            scan(true)
+        end,
+        Tooltip = 'Songs to play in order, empty plays everything'
+    })
+    ShowHUD = MP3Player:CreateToggle({
+        Name = 'Show HUD',
+        Default = true,
+        Tooltip = 'Shows the now-playing panel',
+        Function = function(callback)
+            if MP3Player.Children then
+                MP3Player.Children.Visible = callback and MP3Player.Enabled
+            end
+        end
+    })
+    local function refreshPulseOptions()
+        local on = PulseToBeat and PulseToBeat.Enabled
+        local kind = PulseType and PulseType.Value or 'FOV'
+        local regions = PulseRegions and PulseRegions.Value or 'Whole'
+        if PulseType and PulseType.Object then PulseType.Object.Visible = on end
+        if PulseIntensity and PulseIntensity.Object then PulseIntensity.Object.Visible = on end
+        if PulseColor and PulseColor.Object then PulseColor.Object.Visible = on and kind == 'Colour' end
+        if PulseRegions and PulseRegions.Object then PulseRegions.Object.Visible = on and kind == 'Colour' end
+        if pulseWhole then
+            pulseWhole.Visible = on and kind == 'Colour'
+            pulseWhole.BackgroundTransparency = 1
+        end
+        for _, edge in ipairs(pulseEdges) do
+            edge.Visible = on and kind == 'Colour' and regions == 'Border'
+            edge.BackgroundTransparency = 1
+        end
+        if not on then resetPulse() end
+    end
+
+    PulseToBeat = MP3Player:CreateToggle({
+        Name = 'Pulse to Beat',
+        Function = function()
+            refreshPulseOptions()
+        end,
+        Tooltip = 'Pulses the screen to the beat of the current song'
+    })
+    PulseType = MP3Player:CreateDropdown({
+        Name = 'Type',
+        List = { 'FOV', 'Colour' },
+        Default = 'FOV',
+        Darker = true,
+        Function = refreshPulseOptions,
+        Tooltip = 'FOV - bumps your field of view\nColour - pulses an overlay',
+    })
+    PulseIntensity = MP3Player:CreateSlider({
+        Name = 'Intensity',
+        Min = 1,
+        Max = 100,
+        Default = 55,
+        Suffix = '%',
+        Darker = true,
+        Tooltip = 'How strong the pulse is',
+    })
+    PulseColor = MP3Player:CreateColorSlider({
+        Name = 'Pulse Colour',
+        Darker = true,
+        DefaultSat = 0,
+        DefaultValue = 1,
+        Tooltip = 'Colour used by the Colour pulse type',
+    })
+    PulseRegions = MP3Player:CreateDropdown({
+        Name = 'Regions',
+        List = { 'Whole', 'Border' },
+        Default = 'Whole',
+        Darker = true,
+        Function = refreshPulseOptions,
+        Tooltip = 'Pulses the whole screen or only its edges',
+    })
+    refreshPulseOptions()
+end)

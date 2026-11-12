@@ -1,0 +1,4 @@
+
+return {
+    lastAttackTime = workspace:GetServerTimeNow()
+}

@@ -1,0 +1,67 @@
+{
+	"added": [
+		"Booster",
+		"LobbyExploit",
+		"ChestSteal"
+	],
+	"updated": [
+		"AutoBank",
+		"Fly",
+		"AutoPearl",
+		"AutoVoidDrop"
+	],
+	"newModules": [
+		"Booster",
+		"LobbyExploit",
+		"ChestSteal"
+	],
+	"updatedModules": [
+		"AutoBank",
+		"Fly",
+		"AutoPearl",
+		"AutoVoidDrop"
+	],
+	"brokenModules": [],
+	"premiumModules": [],
+	"removedModules": [
+		"ChestManager",
+		"InfJetpack"
+	],
+	"games": {
+		"universal": {
+			"newModules": [],
+			"updatedModules": [],
+			"brokenModules": []
+		},
+		"bedwars": {
+			"newModules": [],
+			"updatedModules": [],
+			"brokenModules": []
+		},
+		"skywars": {
+			"newModules": [],
+			"updatedModules": [],
+			"brokenModules": []
+		},
+		"bedfight": {
+			"newModules": [
+				"Booster",
+				"LobbyExploit",
+				"ChestSteal"
+			],
+			"updatedModules": [
+				"AutoBank",
+				"Fly",
+				"AutoPearl",
+				"AutoVoidDrop"
+			],
+			"brokenModules": []
+		},
+		"tribes": {
+			"newModules": [],
+			"updatedModules": [],
+			"brokenModules": []
+		}
+	},
+	"text": "[BEDFIGHT]\n[+] Booster (Experimental) runs the Booster kit jetpack through five sub-modules you can use together\n[+] Booster InfiniteFuel keeps your jetpack fuel full\n[+] Booster FloatBypass taps the jetpack on and off over the void so you hover almost level without being pulled back\n[+] Booster NoFallDamage taps the jetpack once just before you land from a fall that would hurt\n[+] Booster AntiVoid flies you back up when you fall into the void and hovers until there is ground under you\n[+] Booster AntiHit lifts your hitbox out of sword reach and keeps it up with the jetpack instead of touching the ground\n[+] LobbyExploit (Experimental) carries your lobby Arrows and Fireballs into the match through your team chest\n[+] ChestSteal takes items from team chests you are standing next to\n[^] AutoBank has a While rubberbanding option that banks everything the chest takes while the server pulls you back\n[^] AutoBank Whitelist only lists items the team chest takes\n[^] Fly has a Disable without ground toggle, so it can keep flying when there is no ground to touch\n[!] AutoBank While falling, AutoPearl and AutoVoidDrop no longer mistake an ordinary fall for falling into the void\n[-] Removed ChestManager, whose looting is now ChestSteal and whose banking is part of AutoBank\n[-] Removed InfJetpack, which Booster InfiniteFuel replaces\n[GENERAL]\n[!] Running ElevateV4 again no longer switches the owner panel off\n[!] Usage data keeps one session across a reinject and reports the game you are in from the start\n[GUI]\n[+] Modules can show sub-modules as collapsible cards, each with its own switch and settings"
+}
